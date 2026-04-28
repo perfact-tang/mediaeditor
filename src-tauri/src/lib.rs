@@ -36,8 +36,18 @@ struct Segment {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct OutputSettings {
+    #[serde(default)]
     video: bool,
+    #[serde(default)]
     audio_format: Option<String>,
+    #[serde(default)]
+    transcript: bool,
+    #[serde(default)]
+    transcript_formats: Vec<String>,
+    #[serde(default = "default_transcript_language")]
+    transcript_language: String,
+    #[serde(default = "default_whisper_model")]
+    whisper_model: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -276,6 +286,14 @@ fn sanitize_name(value: &str, fallback: &str) -> String {
     }
 }
 
+fn default_transcript_language() -> String {
+    "auto".to_string()
+}
+
+fn default_whisper_model() -> String {
+    "base".to_string()
+}
+
 fn media_kind(path: &Path) -> String {
     match path
         .extension()
@@ -374,6 +392,177 @@ fn audio_args(
 
     args.push(output_path.to_string_lossy().to_string());
     args
+}
+
+fn transcript_audio_args(source_path: &str, segment: &Segment, output_path: &Path) -> Vec<String> {
+    vec![
+        "-hide_banner".into(),
+        "-y".into(),
+        "-i".into(),
+        source_path.into(),
+        "-ss".into(),
+        format!("{:.3}", segment.start),
+        "-t".into(),
+        format!("{:.3}", segment.end - segment.start),
+        "-vn".into(),
+        "-map".into(),
+        "0:a:0".into(),
+        "-ac".into(),
+        "1".into(),
+        "-ar".into(),
+        "16000".into(),
+        "-c:a".into(),
+        "pcm_s16le".into(),
+        output_path.to_string_lossy().to_string(),
+    ]
+}
+
+fn command_path(command: &str) -> Option<String> {
+    let lookup = if cfg!(target_os = "windows") {
+        ("where", command)
+    } else {
+        ("which", command)
+    };
+    let output = Command::new(lookup.0).arg(lookup.1).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn whisper_command() -> Result<String, String> {
+    if let Ok(command) = std::env::var("WHISPER_COMMAND") {
+        if !command.trim().is_empty() {
+            return Ok(command);
+        }
+    }
+    command_path("whisper").ok_or_else(|| {
+        "Whisper CLI was not found. Install it with `python3 -m pip install -U openai-whisper`, or set WHISPER_COMMAND.".to_string()
+    })
+}
+
+fn whisper_language_arg(value: &str) -> Option<&'static str> {
+    match value {
+        "ja" => Some("Japanese"),
+        "en" => Some("English"),
+        "zh" => Some("Chinese"),
+        "ko" => Some("Korean"),
+        _ => None,
+    }
+}
+
+fn transcript_formats(settings: &OutputSettings) -> Vec<String> {
+    let mut formats: Vec<String> = settings
+        .transcript_formats
+        .iter()
+        .filter(|format| format.as_str() == "txt" || format.as_str() == "srt")
+        .cloned()
+        .collect();
+    formats.sort();
+    formats.dedup();
+    if formats.is_empty() {
+        formats.push("txt".to_string());
+    }
+    formats
+}
+
+fn run_whisper(
+    audio_path: &Path,
+    target_dir: &Path,
+    settings: &OutputSettings,
+    formats: &[String],
+) -> Result<(), String> {
+    let command = whisper_command()?;
+    let output_format = if formats.len() > 1 {
+        "all".to_string()
+    } else {
+        formats[0].clone()
+    };
+    let mut args = vec![
+        audio_path.to_string_lossy().to_string(),
+        "--model".into(),
+        settings.whisper_model.clone(),
+        "--output_dir".into(),
+        target_dir.to_string_lossy().to_string(),
+        "--output_format".into(),
+        output_format,
+        "--fp16".into(),
+        "False".into(),
+    ];
+    if let Some(language) = whisper_language_arg(&settings.transcript_language) {
+        args.extend(["--language".into(), language.into()]);
+    }
+
+    let output = Command::new(command)
+        .args(args)
+        .output()
+        .map_err(|error| format!("failed to start Whisper CLI: {error}"))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(stderr.trim().to_string())
+    }
+}
+
+fn transcribe_to_dir(
+    source_path: &str,
+    source: &Path,
+    request: &SplitRequest,
+    target_dir: &Path,
+    segment_offset: usize,
+) -> Result<Vec<SplitOutput>, String> {
+    if !request.outputs.transcript {
+        return Ok(Vec::new());
+    }
+
+    let formats = transcript_formats(&request.outputs);
+    let project_name = sanitize_name(&request.project_name, "project");
+    fs::create_dir_all(target_dir).map_err(|error| error.to_string())?;
+    let valid_segments: Vec<&Segment> = request
+        .segments
+        .iter()
+        .filter(|segment| {
+            segment.start.is_finite() && segment.end.is_finite() && segment.end > segment.start
+        })
+        .collect();
+
+    if valid_segments.is_empty() {
+        return Err("No valid segments were supplied.".to_string());
+    }
+
+    let mut outputs = Vec::new();
+    for (index, segment) in valid_segments.iter().enumerate() {
+        let number = format!("{:03}", segment_offset + index + 1);
+        let stem = format!("{project_name}_segment_{number}_transcript");
+        let audio_path = target_dir.join(format!("{stem}.wav"));
+        run_ffmpeg(&transcript_audio_args(source_path, segment, &audio_path))?;
+        run_whisper(&audio_path, target_dir, &request.outputs, &formats)?;
+        let _ = fs::remove_file(&audio_path);
+
+        for format in &formats {
+            let output_name = format!("{stem}.{format}");
+            let output_path = target_dir.join(&output_name);
+            if output_path.exists() {
+                outputs.push(SplitOutput {
+                    output_type: "transcript".to_string(),
+                    format: Some(format.clone()),
+                    name: output_name,
+                    path: output_path.to_string_lossy().to_string(),
+                    start: segment.start,
+                    end: segment.end,
+                });
+            }
+        }
+    }
+
+    let _ = source;
+    Ok(outputs)
 }
 
 fn split_to_dir(
@@ -527,6 +716,29 @@ fn split_media_segment(
 }
 
 #[tauri::command]
+fn transcribe_media_segment(
+    source_path: String,
+    request: SplitRequest,
+    segment_index: usize,
+    output_dir: Option<String>,
+) -> Result<SplitResponse, String> {
+    let source = PathBuf::from(&source_path);
+    if !source.is_file() {
+        return Err("Source media file was not found.".to_string());
+    }
+
+    let target_dir = output_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| default_output_dir(&source, &request.project_name));
+    let outputs = transcribe_to_dir(&source_path, &source, &request, &target_dir, segment_index)?;
+
+    Ok(SplitResponse {
+        output_dir: target_dir.to_string_lossy().to_string(),
+        outputs,
+    })
+}
+
+#[tauri::command]
 fn open_folder(path: String) -> Result<(), String> {
     let opener = if cfg!(target_os = "macos") {
         ("open", vec![path])
@@ -551,6 +763,7 @@ pub fn run() {
             select_media_file,
             split_media,
             split_media_segment,
+            transcribe_media_segment,
             open_folder
         ])
         .run(tauri::generate_context!())

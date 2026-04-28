@@ -554,6 +554,48 @@ audio {
   opacity: 0.55;
 }
 
+.transcript-settings {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  padding: 10px;
+  background: #171b1b;
+  border: 1px solid #263131;
+}
+
+.transcript-settings label {
+  display: grid;
+  gap: 6px;
+  color: #b5bdbb;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.transcript-settings label:has(input[type="checkbox"]) {
+  display: flex;
+  align-items: center;
+  min-height: 34px;
+  padding: 0 8px;
+  background: #202424;
+}
+
+.transcript-settings input[type="checkbox"] {
+  accent-color: var(--accent);
+  margin: 0;
+}
+
+.transcript-settings select {
+  min-height: 34px;
+  margin: 0;
+  background: #080a0a;
+}
+
+.transcript-settings :disabled {
+  color: #5f6868;
+  opacity: 0.7;
+}
+
 .segment-list {
   margin: 0;
   padding: 0;

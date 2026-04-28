@@ -45,6 +45,26 @@ Notes:
 - On Windows, run the same repository on Windows to produce the Windows bundle targets from the main Tauri config.
 - Tauri mode uses a native file picker, previews the selected media, and writes exports next to the source file in `<project-name>_exports/`.
 - FFmpeg must be available on `PATH` for both Node and Tauri modes.
+- Whisper transcription uses the local OpenAI Whisper CLI. Install it before using the transcription checkbox:
+
+```bash
+python3 -m pip install -U openai-whisper
+```
+
+OR
+
+```bash
+python3 -m venv .venv-whisper
+source .venv-whisper/bin/activate
+python -m pip install -U pip
+python -m pip install -U openai-whisper
+
+WHISPER_COMMAND="$PWD/.venv-whisper/bin/whisper" npm run tauri:dev
+```
+
+Optional environment:
+
+- `WHISPER_COMMAND`: path/name of the Whisper CLI command. Defaults to `whisper`.
 
 CI build:
 

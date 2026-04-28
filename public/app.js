@@ -46,6 +46,11 @@ const els = {
   videoOutput: $("videoOutput"),
   audioOutput: $("audioOutput"),
   audioFormat: $("audioFormat"),
+  transcriptOutput: $("transcriptOutput"),
+  transcriptLanguage: $("transcriptLanguage"),
+  whisperModel: $("whisperModel"),
+  transcriptTxt: $("transcriptTxt"),
+  transcriptSrt: $("transcriptSrt"),
   metaFile: $("metaFile"),
   metaDuration: $("metaDuration"),
   metaSize: $("metaSize"),
@@ -131,12 +136,17 @@ function activeMedia() {
 function syncButtons() {
   const mediaReady = Boolean(state.duration);
   const exportReady = Boolean((state.uploadId || state.sourcePath) && state.duration);
-  const hasOutput = els.videoOutput.checked || els.audioOutput.checked;
+  const hasTranscriptFormat = els.transcriptTxt.checked || els.transcriptSrt.checked;
+  const hasOutput = els.videoOutput.checked || els.audioOutput.checked || (els.transcriptOutput.checked && hasTranscriptFormat);
   const hasSegments = state.segments.length > 0;
   els.addSegmentBtn.disabled = !mediaReady;
   els.setStartBtn.disabled = !mediaReady;
   els.setEndBtn.disabled = !mediaReady;
   els.audioFormat.disabled = !els.audioOutput.checked;
+  els.transcriptLanguage.disabled = !els.transcriptOutput.checked;
+  els.whisperModel.disabled = !els.transcriptOutput.checked;
+  els.transcriptTxt.disabled = !els.transcriptOutput.checked;
+  els.transcriptSrt.disabled = !els.transcriptOutput.checked;
   els.runSplitBtn.disabled = !(exportReady && hasSegments && hasOutput);
   els.exportTopBtn.disabled = !(exportReady && hasSegments && hasOutput);
 }
@@ -146,7 +156,14 @@ function buildSplitRequest(segments = state.segments) {
     projectName: els.projectName.value || baseName(state.file.name),
     outputs: {
       video: els.videoOutput.checked,
-      audioFormat: els.audioOutput.checked ? els.audioFormat.value : null
+      audioFormat: els.audioOutput.checked ? els.audioFormat.value : null,
+      transcript: els.transcriptOutput.checked,
+      transcriptFormats: [
+        ...(els.transcriptTxt.checked ? ["txt"] : []),
+        ...(els.transcriptSrt.checked ? ["srt"] : [])
+      ],
+      transcriptLanguage: els.transcriptLanguage.value,
+      whisperModel: els.whisperModel.value
     },
     segments
   };
@@ -511,18 +528,38 @@ async function runSplit() {
     if (core && state.sourcePath) {
       const outputs = [];
       let outputDir = null;
-      const total = state.segments.length;
+      const hasMediaOutput = els.videoOutput.checked || els.audioOutput.checked;
+      const hasTranscriptOutput = els.transcriptOutput.checked && (els.transcriptTxt.checked || els.transcriptSrt.checked);
+      const total = state.segments.length * (Number(hasMediaOutput) + Number(hasTranscriptOutput));
+      let completed = 0;
       for (let index = 0; index < state.segments.length; index += 1) {
-        updateProgressModal(`分段 ${index + 1} / ${total} を変換しています...`, Math.round((index / total) * 92) + 4, outputDir || "");
-        const segmentPayload = await core.invoke("split_media_segment", {
-          sourcePath: state.sourcePath,
-          request: buildSplitRequest([state.segments[index]]),
-          segmentIndex: index,
-          outputDir
-        });
-        outputDir = segmentPayload.outputDir;
-        outputs.push(...segmentPayload.outputs);
-        updateProgressModal(`分段 ${index + 1} / ${total} が完了しました。`, Math.round(((index + 1) / total) * 92) + 4, outputDir);
+        if (hasMediaOutput) {
+          updateProgressModal(`分段 ${index + 1} の動画/音声を書き出しています...`, Math.round((completed / total) * 92) + 4, outputDir || "");
+          const segmentPayload = await core.invoke("split_media_segment", {
+            sourcePath: state.sourcePath,
+            request: buildSplitRequest([state.segments[index]]),
+            segmentIndex: index,
+            outputDir
+          });
+          outputDir = segmentPayload.outputDir;
+          outputs.push(...segmentPayload.outputs);
+          completed += 1;
+          updateProgressModal(`分段 ${index + 1} の動画/音声が完了しました。`, Math.round((completed / total) * 92) + 4, outputDir);
+        }
+
+        if (hasTranscriptOutput) {
+          updateProgressModal(`分段 ${index + 1} をWhisperで文字起こししています...`, Math.round((completed / total) * 92) + 4, outputDir || "");
+          const transcriptPayload = await core.invoke("transcribe_media_segment", {
+            sourcePath: state.sourcePath,
+            request: buildSplitRequest([state.segments[index]]),
+            segmentIndex: index,
+            outputDir
+          });
+          outputDir = transcriptPayload.outputDir;
+          outputs.push(...transcriptPayload.outputs);
+          completed += 1;
+          updateProgressModal(`分段 ${index + 1} の文字起こしが完了しました。`, Math.round((completed / total) * 92) + 4, outputDir);
+        }
       }
       payload = { outputDir, outputs };
       if (payload.outputDir) {
@@ -605,6 +642,11 @@ els.endInput.addEventListener("change", readRangeInputs);
 els.videoOutput.addEventListener("change", syncButtons);
 els.audioOutput.addEventListener("change", syncButtons);
 els.audioFormat.addEventListener("change", syncButtons);
+els.transcriptOutput.addEventListener("change", syncButtons);
+els.transcriptLanguage.addEventListener("change", syncButtons);
+els.whisperModel.addEventListener("change", syncButtons);
+els.transcriptTxt.addEventListener("change", syncButtons);
+els.transcriptSrt.addEventListener("change", syncButtons);
 els.addSegmentBtn.addEventListener("click", () => {
   const range = readRangeInputs();
   if (!range) return;

@@ -102,7 +102,28 @@
                 <option value="wav">wav</option>
               </select>
             </label>
-            <label class="output-toggle muted-toggle"><input type="checkbox" disabled /> 文字起こし</label>
+            <label class="output-toggle"><input id="transcriptOutput" type="checkbox" /> 文字起こし</label>
+            <div class="transcript-settings">
+              <label>言語
+                <select id="transcriptLanguage">
+                  <option value="auto">自動判別</option>
+                  <option value="ja">日本語</option>
+                  <option value="en">English</option>
+                  <option value="zh">中文</option>
+                  <option value="ko">한국어</option>
+                </select>
+              </label>
+              <label>モデル
+                <select id="whisperModel">
+                  <option value="base">base</option>
+                  <option value="small">small</option>
+                  <option value="medium">medium</option>
+                  <option value="large">large</option>
+                </select>
+              </label>
+              <label><input id="transcriptTxt" type="checkbox" checked /> txt</label>
+              <label><input id="transcriptSrt" type="checkbox" checked /> srt</label>
+            </div>
           </div>
         </section>
         <ol id="segmentList" class="segment-list"></ol>

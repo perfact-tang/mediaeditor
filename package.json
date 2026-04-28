@@ -1,0 +1,20 @@
+{
+  "name": "mediasplitter-ai-mvp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Phase 1 MVP for MediaSplitter AI: import, preview, manual segments, and FFmpeg stream-copy splitting.",
+  "type": "module",
+  "scripts": {
+    "dev": "node server.js",
+    "start": "node server.js",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0"
+  }
+}

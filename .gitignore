@@ -1,0 +1,5 @@
+node_modules/
+uploads/
+exports/
+src-tauri/target/
+.DS_Store

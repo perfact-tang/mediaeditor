@@ -1,0 +1,19 @@
+[package]
+name = "mediasplitter-ai"
+version = "0.1.0"
+description = "MediaSplitter AI Phase 1 desktop app"
+authors = ["MediaSplitter AI"]
+edition = "2021"
+
+[lib]
+name = "mediasplitter_ai_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+rfd = "0.15"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = ["protocol-asset"] }

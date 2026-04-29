@@ -36,6 +36,13 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": [
+      "resources/bin/*",
+      "resources/models/ggml-base.bin"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "10.15"
+    },
     "category": "Video",
     "shortDescription": "Fast video and audio splitter",
     "longDescription": "MediaSplitter AI imports media, lets users define manual segments, and exports video or audio with FFmpeg."

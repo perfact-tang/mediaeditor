@@ -13,7 +13,8 @@ use std::{
     thread,
     time::{SystemTime, UNIX_EPOCH},
 };
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
+use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -74,6 +75,12 @@ struct SplitOutput {
 struct SplitResponse {
     output_dir: String,
     outputs: Vec<SplitOutput>,
+}
+
+struct TranscriptSegment {
+    start_cs: i64,
+    end_cs: i64,
+    text: String,
 }
 
 #[derive(Clone)]
@@ -325,11 +332,34 @@ fn media_mime(path: &Path) -> String {
     .to_string()
 }
 
-fn run_ffmpeg(args: &[String]) -> Result<(), String> {
-    let output = Command::new("ffmpeg")
+fn bundled_ffmpeg_path(app: &AppHandle) -> Option<PathBuf> {
+    let binary_name = if cfg!(target_os = "windows") {
+        "ffmpeg.exe"
+    } else {
+        "ffmpeg"
+    };
+
+    let dev_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("resources")
+        .join("bin")
+        .join(binary_name);
+    if dev_path.is_file() {
+        return Some(dev_path);
+    }
+
+    app.path()
+        .resource_dir()
+        .ok()
+        .map(|dir| dir.join("resources").join("bin").join(binary_name))
+        .filter(|path| path.is_file())
+}
+
+fn run_ffmpeg(app: &AppHandle, args: &[String]) -> Result<(), String> {
+    let command = bundled_ffmpeg_path(app).unwrap_or_else(|| PathBuf::from("ffmpeg"));
+    let output = Command::new(&command)
         .args(args)
         .output()
-        .map_err(|error| format!("failed to start ffmpeg: {error}"))?;
+        .map_err(|error| format!("failed to start ffmpeg at {}: {error}", command.display()))?;
 
     if output.status.success() {
         Ok(())
@@ -417,40 +447,12 @@ fn transcript_audio_args(source_path: &str, segment: &Segment, output_path: &Pat
     ]
 }
 
-fn command_path(command: &str) -> Option<String> {
-    let lookup = if cfg!(target_os = "windows") {
-        ("where", command)
-    } else {
-        ("which", command)
-    };
-    let output = Command::new(lookup.0).arg(lookup.1).output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .next()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
-fn whisper_command() -> Result<String, String> {
-    if let Ok(command) = std::env::var("WHISPER_COMMAND") {
-        if !command.trim().is_empty() {
-            return Ok(command);
-        }
-    }
-    command_path("whisper").ok_or_else(|| {
-        "Whisper CLI was not found. Install it with `python3 -m pip install -U openai-whisper`, or set WHISPER_COMMAND.".to_string()
-    })
-}
-
 fn whisper_language_arg(value: &str) -> Option<&'static str> {
     match value {
-        "ja" => Some("Japanese"),
-        "en" => Some("English"),
-        "zh" => Some("Chinese"),
-        "ko" => Some("Korean"),
+        "ja" => Some("ja"),
+        "en" => Some("en"),
+        "zh" => Some("zh"),
+        "ko" => Some("ko"),
         _ => None,
     }
 }
@@ -470,49 +472,152 @@ fn transcript_formats(settings: &OutputSettings) -> Vec<String> {
     formats
 }
 
-fn run_whisper(
-    audio_path: &Path,
-    target_dir: &Path,
-    settings: &OutputSettings,
-    formats: &[String],
-) -> Result<(), String> {
-    let command = whisper_command()?;
-    let output_format = if formats.len() > 1 {
-        "all".to_string()
-    } else {
-        formats[0].clone()
+fn whisper_model_path(app: &AppHandle, settings: &OutputSettings) -> Result<PathBuf, String> {
+    let model_name = match settings.whisper_model.as_str() {
+        "tiny" => "ggml-tiny.bin",
+        "small" => "ggml-small.bin",
+        "medium" => "ggml-medium.bin",
+        "large" => "ggml-large-v3.bin",
+        _ => "ggml-base.bin",
     };
-    let mut args = vec![
-        audio_path.to_string_lossy().to_string(),
-        "--model".into(),
-        settings.whisper_model.clone(),
-        "--output_dir".into(),
-        target_dir.to_string_lossy().to_string(),
-        "--output_format".into(),
-        output_format,
-        "--fp16".into(),
-        "False".into(),
-    ];
-    if let Some(language) = whisper_language_arg(&settings.transcript_language) {
-        args.extend(["--language".into(), language.into()]);
+
+    let dev_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("resources")
+        .join("models")
+        .join(model_name);
+    if dev_path.is_file() {
+        return Ok(dev_path);
     }
 
-    let output = Command::new(command)
-        .args(args)
-        .output()
-        .map_err(|error| format!("failed to start Whisper CLI: {error}"))?;
-
-    if output.status.success() {
-        Ok(())
+    let resource_path = app
+        .path()
+        .resource_dir()
+        .map_err(|error| error.to_string())?
+        .join("resources")
+        .join("models")
+        .join(model_name);
+    if resource_path.is_file() {
+        Ok(resource_path)
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(stderr.trim().to_string())
+        Err(format!(
+            "Whisper model was not found: {}. The default bundled model is ggml-base.bin.",
+            resource_path.display()
+        ))
     }
 }
 
+fn read_mono_16k_wav(path: &Path) -> Result<Vec<f32>, String> {
+    let mut reader = hound::WavReader::open(path).map_err(|error| error.to_string())?;
+    let spec = reader.spec();
+    if spec.channels != 1 || spec.sample_rate != 16_000 || spec.bits_per_sample != 16 {
+        return Err("Expected a 16kHz mono 16-bit WAV for Whisper input.".to_string());
+    }
+    let samples: Vec<i16> = reader
+        .samples::<i16>()
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    let mut audio = vec![0.0_f32; samples.len()];
+    whisper_rs::convert_integer_to_float_audio(&samples, &mut audio)
+        .map_err(|error| error.to_string())?;
+    Ok(audio)
+}
+
+fn run_whisper(
+    app: &AppHandle,
+    audio_path: &Path,
+    settings: &OutputSettings,
+) -> Result<Vec<TranscriptSegment>, String> {
+    let model_path = whisper_model_path(app, settings)?;
+    let audio = read_mono_16k_wav(audio_path)?;
+    let model_path_str = model_path.to_string_lossy();
+    let ctx = WhisperContext::new_with_params(
+        model_path_str.as_ref(),
+        WhisperContextParameters::default(),
+    )
+    .map_err(|error| format!("failed to load Whisper model: {error}"))?;
+    let mut state = ctx
+        .create_state()
+        .map_err(|error| format!("failed to create Whisper state: {error}"))?;
+    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+    params.set_print_special(false);
+    params.set_print_progress(false);
+    params.set_print_realtime(false);
+    params.set_print_timestamps(false);
+    params.set_no_context(true);
+    if let Some(language) = whisper_language_arg(&settings.transcript_language) {
+        params.set_language(Some(language));
+    } else {
+        params.set_language(None);
+        params.set_detect_language(true);
+    }
+    let threads = std::thread::available_parallelism()
+        .map(|count| count.get().min(8) as i32)
+        .unwrap_or(4);
+    params.set_n_threads(threads);
+
+    state
+        .full(params, &audio)
+        .map_err(|error| format!("Whisper transcription failed: {error}"))?;
+
+    Ok(state
+        .as_iter()
+        .map(|segment| TranscriptSegment {
+            start_cs: segment.start_timestamp(),
+            end_cs: segment.end_timestamp(),
+            text: segment.to_string().trim().to_string(),
+        })
+        .collect())
+}
+
+fn format_srt_timestamp(centiseconds: i64) -> String {
+    let total_ms = centiseconds.max(0) * 10;
+    let hours = total_ms / 3_600_000;
+    let minutes = (total_ms % 3_600_000) / 60_000;
+    let seconds = (total_ms % 60_000) / 1000;
+    let millis = total_ms % 1000;
+    format!("{hours:02}:{minutes:02}:{seconds:02},{millis:03}")
+}
+
+fn write_transcripts(
+    target_dir: &Path,
+    stem: &str,
+    formats: &[String],
+    segments: &[TranscriptSegment],
+) -> Result<Vec<(String, PathBuf, String)>, String> {
+    let mut outputs = Vec::new();
+    if formats.iter().any(|format| format == "txt") {
+        let output_name = format!("{stem}.txt");
+        let output_path = target_dir.join(&output_name);
+        let text = segments
+            .iter()
+            .map(|segment| segment.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&output_path, text).map_err(|error| error.to_string())?;
+        outputs.push(("txt".to_string(), output_path, output_name));
+    }
+    if formats.iter().any(|format| format == "srt") {
+        let output_name = format!("{stem}.srt");
+        let output_path = target_dir.join(&output_name);
+        let mut srt = String::new();
+        for (index, segment) in segments.iter().enumerate() {
+            srt.push_str(&format!(
+                "{}\n{} --> {}\n{}\n\n",
+                index + 1,
+                format_srt_timestamp(segment.start_cs),
+                format_srt_timestamp(segment.end_cs),
+                segment.text
+            ));
+        }
+        fs::write(&output_path, srt).map_err(|error| error.to_string())?;
+        outputs.push(("srt".to_string(), output_path, output_name));
+    }
+    Ok(outputs)
+}
+
 fn transcribe_to_dir(
+    app: &AppHandle,
     source_path: &str,
-    source: &Path,
     request: &SplitRequest,
     target_dir: &Path,
     segment_offset: usize,
@@ -541,31 +646,31 @@ fn transcribe_to_dir(
         let number = format!("{:03}", segment_offset + index + 1);
         let stem = format!("{project_name}_segment_{number}_transcript");
         let audio_path = target_dir.join(format!("{stem}.wav"));
-        run_ffmpeg(&transcript_audio_args(source_path, segment, &audio_path))?;
-        run_whisper(&audio_path, target_dir, &request.outputs, &formats)?;
+        run_ffmpeg(
+            app,
+            &transcript_audio_args(source_path, segment, &audio_path),
+        )?;
+        let transcript_segments = run_whisper(app, &audio_path, &request.outputs)?;
         let _ = fs::remove_file(&audio_path);
 
-        for format in &formats {
-            let output_name = format!("{stem}.{format}");
-            let output_path = target_dir.join(&output_name);
-            if output_path.exists() {
-                outputs.push(SplitOutput {
-                    output_type: "transcript".to_string(),
-                    format: Some(format.clone()),
-                    name: output_name,
-                    path: output_path.to_string_lossy().to_string(),
-                    start: segment.start,
-                    end: segment.end,
-                });
-            }
+        for (format, output_path, output_name) in
+            write_transcripts(target_dir, &stem, &formats, &transcript_segments)?
+        {
+            outputs.push(SplitOutput {
+                output_type: "transcript".to_string(),
+                format: Some(format),
+                name: output_name,
+                path: output_path.to_string_lossy().to_string(),
+                start: segment.start,
+                end: segment.end,
+            });
         }
     }
-
-    let _ = source;
     Ok(outputs)
 }
 
 fn split_to_dir(
+    app: &AppHandle,
     source_path: &str,
     source: &Path,
     request: &SplitRequest,
@@ -611,7 +716,7 @@ fn split_to_dir(
         if request.outputs.video {
             let output_name = format!("{project_name}_segment_{number}.{input_ext}");
             let output_path = target_dir.join(&output_name);
-            run_ffmpeg(&video_args(source_path, segment, &output_path))?;
+            run_ffmpeg(app, &video_args(source_path, segment, &output_path))?;
             outputs.push(SplitOutput {
                 output_type: "video".to_string(),
                 format: None,
@@ -625,7 +730,7 @@ fn split_to_dir(
         if let Some(format) = audio_format {
             let output_name = format!("{project_name}_segment_{number}_audio.{format}");
             let output_path = target_dir.join(&output_name);
-            run_ffmpeg(&audio_args(source_path, segment, format, &output_path))?;
+            run_ffmpeg(app, &audio_args(source_path, segment, format, &output_path))?;
             outputs.push(SplitOutput {
                 output_type: "audio".to_string(),
                 format: Some(format.to_string()),
@@ -677,14 +782,18 @@ fn select_media_file(server: State<'_, PreviewServer>) -> Result<Option<MediaInf
 }
 
 #[tauri::command]
-fn split_media(source_path: String, request: SplitRequest) -> Result<SplitResponse, String> {
+fn split_media(
+    app: AppHandle,
+    source_path: String,
+    request: SplitRequest,
+) -> Result<SplitResponse, String> {
     let source = PathBuf::from(&source_path);
     if !source.is_file() {
         return Err("Source media file was not found.".to_string());
     }
 
     let target_dir = default_output_dir(&source, &request.project_name);
-    let outputs = split_to_dir(&source_path, &source, &request, &target_dir, 0)?;
+    let outputs = split_to_dir(&app, &source_path, &source, &request, &target_dir, 0)?;
 
     Ok(SplitResponse {
         output_dir: target_dir.to_string_lossy().to_string(),
@@ -694,6 +803,7 @@ fn split_media(source_path: String, request: SplitRequest) -> Result<SplitRespon
 
 #[tauri::command]
 fn split_media_segment(
+    app: AppHandle,
     source_path: String,
     request: SplitRequest,
     segment_index: usize,
@@ -707,7 +817,14 @@ fn split_media_segment(
     let target_dir = output_dir
         .map(PathBuf::from)
         .unwrap_or_else(|| default_output_dir(&source, &request.project_name));
-    let outputs = split_to_dir(&source_path, &source, &request, &target_dir, segment_index)?;
+    let outputs = split_to_dir(
+        &app,
+        &source_path,
+        &source,
+        &request,
+        &target_dir,
+        segment_index,
+    )?;
 
     Ok(SplitResponse {
         output_dir: target_dir.to_string_lossy().to_string(),
@@ -717,6 +834,7 @@ fn split_media_segment(
 
 #[tauri::command]
 fn transcribe_media_segment(
+    app: AppHandle,
     source_path: String,
     request: SplitRequest,
     segment_index: usize,
@@ -730,7 +848,7 @@ fn transcribe_media_segment(
     let target_dir = output_dir
         .map(PathBuf::from)
         .unwrap_or_else(|| default_output_dir(&source, &request.project_name));
-    let outputs = transcribe_to_dir(&source_path, &source, &request, &target_dir, segment_index)?;
+    let outputs = transcribe_to_dir(&app, &source_path, &request, &target_dir, segment_index)?;
 
     Ok(SplitResponse {
         output_dir: target_dir.to_string_lossy().to_string(),

@@ -44,27 +44,13 @@ Notes:
 - On macOS, this project uses `src-tauri/tauri.macos.conf.json` to produce a `.app` bundle.
 - On Windows, run the same repository on Windows to produce the Windows bundle targets from the main Tauri config.
 - Tauri mode uses a native file picker, previews the selected media, and writes exports next to the source file in `<project-name>_exports/`.
-- FFmpeg must be available on `PATH` for both Node and Tauri modes.
-- Whisper transcription uses the local OpenAI Whisper CLI. Install it before using the transcription checkbox:
+- Tauri builds bundle FFmpeg automatically through `ffmpeg-static`; no separate FFmpeg install is required for the installed app.
+- Node browser mode still expects FFmpeg on `PATH`.
+- Whisper transcription is built into the Rust/Tauri app through `whisper-rs` and a bundled whisper.cpp model.
+- The default bundled model is `src-tauri/resources/models/ggml-base.bin`.
+- Python and `openai-whisper` are not required on the installed computer.
 
-```bash
-python3 -m pip install -U openai-whisper
-```
-
-OR
-
-```bash
-python3 -m venv .venv-whisper
-source .venv-whisper/bin/activate
-python -m pip install -U pip
-python -m pip install -U openai-whisper
-
-WHISPER_COMMAND="$PWD/.venv-whisper/bin/whisper" npm run tauri:dev
-```
-
-Optional environment:
-
-- `WHISPER_COMMAND`: path/name of the Whisper CLI command. Defaults to `whisper`.
+To bundle additional models, place them in `src-tauri/resources/models/` and add them to `bundle.resources` in `src-tauri/tauri.conf.json`.
 
 CI build:
 
